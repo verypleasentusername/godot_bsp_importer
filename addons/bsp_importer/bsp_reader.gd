@@ -12,6 +12,10 @@ const CONTENTS_SOLID := -2
 const CONTENTS_WATER := -3
 const CONTENTS_SLIME := -4
 const CONTENTS_LAVA := -5
+const SURFACE_FLAG_SKY := 4
+const SURFACE_FLAG_NODRAW := 128
+const SURFACE_FLAG_HINT := 256
+const SURFACE_FLAG_SKIP := 512
 #define CONTENTS_SKY          -6
 #define CONTENTS_ORIGIN       -7
 #define CONTENTS_CLIP         -8
@@ -149,7 +153,7 @@ class BSPTexture:
 		name = name.to_lower()
 		#current_file_offset = file.get_position()
 		print("texture: ", name, " width: ", width, " height: ", height)
-		if (name != &"skip" && name != &"trigger" && name != &"waterskip" && name != &"slimeskip" && name != &"clip"):
+		if (name != &"skip" && name != &"trigger" && name != &"waterskip" && name != &"slimeskip" && name != &"clip" && (reader.include_sky_surfaces || !name.begins_with("sky"))):
 			var material_info := reader.load_or_create_material(name, self)
 			if (material_info):
 				material = material_info.material
@@ -322,7 +326,7 @@ var mesh_separation_grid_size := 256.0
 var bspx_model_to_brush_map := {}
 var fullbright_range : PackedInt32Array = [224, 255]
 var ignored_flags : PackedInt64Array = []
-
+var include_sky_surfaces := true
 
 # used for reading wads for goldsource games.
 var is_gsrc : bool = false 
@@ -1074,7 +1078,7 @@ func convert_entity_dict_to_scene(ent_dict_array : Array):
 								var dest_type := typeof(dest_value)
 								match (dest_type):
 									TYPE_BOOL:
-										value = string_value.to_int() != 0
+										value = convert_string_to_bool(string_value)
 									TYPE_INT:
 										value = string_value.to_int()
 									TYPE_FLOAT:
@@ -1584,6 +1588,9 @@ func load_or_create_material(name : StringName, bsp_texture : BSPTexture = null)
 			material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 			material.diffuse_mode = BaseMaterial3D.DIFFUSE_BURLEY
 			material.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
+			if (name.begins_with(transparent_texture_prefix)):
+				print("Transparency enabled.")
+				material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
 			if (save_separate_materials): # Write materials
 				print("Save separate materials.")
 				# Write texture if it wasn't in the project.
@@ -1865,7 +1872,8 @@ func convert_to_mesh(file, table : PackedStringArray = Q2_TABLE):
 	for surface in mesh.get_surface_count():
 		arm.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, mesh.surface_get_arrays(surface))
 		arm.surface_set_material(surface, mesh.surface_get_material(surface))
-	
+	if (generate_lightmap_uv2):
+		arm.lightmap_unwrap(mi.global_transform, unit_scale * 4.0)
 	mi.mesh = arm
 	
 	return mi
@@ -2422,7 +2430,12 @@ func create_mesh(face_data : Array[BSPFace]) -> Mesh:
 		
 		for face in face_data:
 			var texture : BSPTextureInfo = texture_list[face.texinfo_id]
-			if surface_list.has(texture.texture_path) and !ignored_flags.has(texture.flags):
+			var ignore_surface := ignored_flags.has(texture.flags) # Can probably get rid of this once all the normal skipping flags are added
+			if (texture.flags & (SURFACE_FLAG_NODRAW | SURFACE_FLAG_HINT | SURFACE_FLAG_SKIP)):
+				ignore_surface = true
+			if (!include_sky_surfaces && (texture.flags & SURFACE_FLAG_SKY)):
+				ignore_surface = true
+			if surface_list.has(texture.texture_path) and !ignore_surface:
 				var surface_tool : SurfaceTool = surface_list.get(texture.texture_path)
 				var material_info : MaterialInfo = material_info_lookup.get(surface_tool, null)
 				if (!material_info):
@@ -2481,7 +2494,12 @@ func create_mesh(face_data : Array[BSPFace]) -> Mesh:
 				var width := material_info.width
 				var height := material_info.height
 				var verts : PackedVector3Array = face.verts
-				if not ignored_flags.has(texture.flags):
+				var ignore_surface := ignored_flags.has(texture.flags) # Can probably get rid of this once all the normal skipping flags are added
+				if (texture.flags & (SURFACE_FLAG_NODRAW | SURFACE_FLAG_HINT | SURFACE_FLAG_SKIP)):
+					ignore_surface = true
+				if (!include_sky_surfaces && (texture.flags & SURFACE_FLAG_SKY)):
+					ignore_surface = true
+				if (!ignore_surface):
 					for vertIndex in range(0, verts.size(), 3):
 						var v0 = verts[vertIndex + 0]
 						var v1 = verts[vertIndex + 1]
@@ -2530,6 +2548,18 @@ func convert_from_uint32(uint32 : PackedByteArray):
 	var uint32_value = uint32.decode_u32(0)
 	if uint32.size() < 4: return 0
 	return uint32_value
+
+
+## Non-zero values are true, as do "t" and "y" for "true" and "yes".
+static func convert_string_to_bool(string : String) -> bool:
+	if (string.length() == 0):
+		return false
+	if (string.to_int() != 0):
+		return true
+	var first_character := string[0].to_lower()
+	if (first_character == 't' || first_character == 'y'):
+		return true
+	return false
 
 
 ## returns bytes, indices should be an array e.g. [1, 2, 3, 4]
